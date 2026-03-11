@@ -1,0 +1,7 @@
+# Don't push local face database (managed via Supabase)
+faces/
+venv/
+__pycache__/
+*.pyc
+.env
+*.log

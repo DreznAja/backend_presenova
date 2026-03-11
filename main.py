@@ -1,15 +1,15 @@
 """
 Presenova Face Recognition API
-Run with: uvicorn main:app --reload --port 8000
+Run locally: uvicorn main:app --reload --port 8000
+Deploy: Hugging Face Spaces (Docker, port 7860)
 """
 import os
 import base64
-import json
-import shutil
 import uuid
 from pathlib import Path
 from io import BytesIO
 from typing import Optional
+from contextlib import asynccontextmanager
 
 import numpy as np
 from PIL import Image
@@ -21,7 +21,58 @@ from supabase import create_client, Client
 
 load_dotenv()
 
-app = FastAPI(title="Presenova Face API", version="1.0.0")
+# ─── Supabase client ──────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Local face database directory
+FACES_DIR = Path("./faces")
+FACES_DIR.mkdir(exist_ok=True)
+
+
+def sync_faces_from_supabase():
+    """
+    Download all registered face photos from Supabase Storage to local faces/.
+    Called on startup — critical for HF Spaces (ephemeral storage).
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("[WARN] Supabase not configured, skipping face sync")
+        return
+    try:
+        files = supabase_client.storage.from_("face-photos").list()
+        if not files:
+            print("[INFO] No faces in Supabase Storage yet")
+            return
+        synced = 0
+        for f in files:
+            name = f.get("name", "")
+            if not name.endswith(".jpg"):
+                continue
+            local = FACES_DIR / name
+            if local.exists():
+                continue  # already cached
+            url = supabase_client.storage.from_("face-photos").get_public_url(name)
+            import requests
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                local.write_bytes(r.content)
+                synced += 1
+        print(f"[INFO] Face sync complete: {synced} new photos downloaded")
+    except Exception as e:
+        print(f"[WARN] Face sync failed: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: sync faces from Supabase
+    print("[INFO] Starting Presenova Face API...")
+    sync_faces_from_supabase()
+    yield
+    # Shutdown (nothing to clean up)
+
+
+app = FastAPI(title="Presenova Face API", version="1.0.0", lifespan=lifespan)
 
 # CORS — allow Next.js dev server
 app.add_middleware(
@@ -31,15 +82,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Supabase client
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Local face database directory
-FACES_DIR = Path("./faces")
-FACES_DIR.mkdir(exist_ok=True)
 
 # ─── Models ───────────────────────────────────────────
 class RegisterFaceRequest(BaseModel):
